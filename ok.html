@@ -1,0 +1,1555 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>复古地牢台球：倒立美少女V字架杆对决</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            background-color: #090b10;
+            color: #e2e8f0;
+            font-family: 'Courier New', Courier, 'Microsoft YaHei', monospace;
+            overflow: hidden;
+        }
+
+        #game-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            background: #111827;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+            cursor: crosshair;
+        }
+
+        #top-bar {
+            position: absolute;
+            top: 10px;
+            left: 12px;
+            right: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            pointer-events: none;
+            z-index: 20;
+            gap: 10px;
+        }
+
+        .hud-panel {
+            background: rgba(12, 16, 24, 0.88);
+            border: 2px solid #475569;
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 12px;
+            line-height: 1.5;
+            color: #cbd5e1;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.75);
+            pointer-events: auto;
+        }
+
+        .kbd {
+            display: inline-block;
+            background: #1e293b;
+            border: 1px solid #64748b;
+            border-radius: 3px;
+            padding: 0 5px;
+            color: #f8fafc;
+            font-weight: bold;
+        }
+
+        #controls-right {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+            pointer-events: auto;
+        }
+
+        .retro-btn {
+            background: #1e293b;
+            color: #38bdf8;
+            border: 2px solid #38bdf8;
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: bold;
+            cursor: pointer;
+            font-family: inherit;
+            transition: all 0.12s;
+            box-shadow: 0 3px 10px rgba(0, 0, 0, 0.6);
+        }
+
+        .retro-btn:hover {
+            background: #38bdf8;
+            color: #090b10;
+        }
+
+        .retro-btn.warn {
+            border-color: #facc15;
+            color: #facc15;
+        }
+
+        .retro-btn.warn:hover {
+            background: #facc15;
+            color: #090b10;
+        }
+
+        #toast-msg {
+            position: absolute;
+            top: 86px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(15, 23, 42, 0.94);
+            border: 2px solid #facc15;
+            color: #fef08a;
+            padding: 6px 16px;
+            border-radius: 4px;
+            font-size: 13px;
+            font-weight: bold;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            z-index: 30;
+            white-space: nowrap;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="gameCanvas" width="480" height="270"></canvas>
+    <div id="toast-msg">玩家先手！按住左键或空格蓄力出杆</div>
+
+    <div id="top-bar">
+        <div class="hud-panel">
+            <div><span class="kbd">A D</span> 左右绕台瞄准 &nbsp;|&nbsp; <span class="kbd">← →</span> 精调方向 &nbsp;|&nbsp; <span class="kbd">W S</span> 前后移动</div>
+            <div><span class="kbd">按住左键</span> / <span class="kbd">空格</span> 拉杆蓄力，松开穿过裤裆出杆！未进球轮到 AI</div>
+            <div style="margin-top:3px;" id="turn-status-text">当前回合: <b style="color:#38bdf8">玩家先手</b> | 玩家: 0 &nbsp; AI: 0</div>
+        </div>
+
+        <div id="controls-right">
+            <button class="retro-btn" onclick="snapToCueBall()">🎯 对准白球</button>
+            <button class="retro-btn warn" onclick="toggleTopView()">👁️ 切换俯视/3D</button>
+            <button class="retro-btn" onclick="resetRack()">🎱 重新摆球</button>
+        </div>
+    </div>
+</div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+window.addEventListener('contextmenu', e => e.preventDefault());
+
+const SCREEN_W = 480;
+const SCREEN_H = 270;
+canvas.width = SCREEN_W;
+canvas.height = SCREEN_H;
+
+const frameImage = ctx.createImageData(SCREEN_W, SCREEN_H);
+const frameBuf32 = new Uint32Array(frameImage.data.buffer);
+
+let viewMode = '3d';
+
+// ============================================================================
+// 1. WebAudio 复古撞球音效
+// ============================================================================
+let audioCtx = null;
+function initAudio() {
+    if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) audioCtx = new AC();
+    }
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+function playBallHitSound(intensity = 1.0) {
+    if (!audioCtx) return;
+    try {
+        const now = audioCtx.currentTime;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'triangle';
+        const vol = Math.min(0.45, Math.max(0.04, intensity * 0.35));
+        osc.frequency.setValueAtTime(920 + Math.random() * 240, now);
+        osc.frequency.exponentialRampToValueAtTime(210, now + 0.045);
+        gain.gain.setValueAtTime(vol, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.045);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(now);
+        osc.stop(now + 0.05);
+    } catch (e) {}
+}
+
+function playPocketSound() {
+    if (!audioCtx) return;
+    try {
+        const now = audioCtx.currentTime;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(260, now);
+        osc.frequency.exponentialRampToValueAtTime(90, now + 0.18);
+        gain.gain.setValueAtTime(0.3, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(now);
+        osc.stop(now + 0.19);
+    } catch (e) {}
+}
+
+function showToast(text) {
+    const el = document.getElementById('toast-msg');
+    if (!el) return;
+    el.textContent = text;
+    el.style.opacity = '1';
+    clearTimeout(el._timer);
+    el._timer = setTimeout(() => { el.style.opacity = '0'; }, 2000);
+}
+
+// ============================================================================
+// 2. 德军总部 3D 风格地牢地图与纹理
+// ============================================================================
+const MAP_SIZE = 16;
+const WORLD_MAP = [
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,3,0,0,0,0,0,0,0,0,0,0,3,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,3,0,0,0,0,0,0,0,0,0,0,3,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+];
+
+const TEX_SIZE = 64;
+const textures = { 1: new Uint32Array(TEX_SIZE * TEX_SIZE), 3: new Uint32Array(TEX_SIZE * TEX_SIZE) };
+
+function packABGR(r, g, b, a = 255) {
+    return ((a & 255) << 24) | ((b & 255) << 16) | ((g & 255) << 8) | (r & 255);
+}
+
+for (let y = 0; y < TEX_SIZE; y++) {
+    for (let x = 0; x < TEX_SIZE; x++) {
+        const idx = y * TEX_SIZE + x;
+        const noise = ((Math.sin(x * 12.9898 + y * 78.233) * 43758.5453) % 1) * 14 - 7;
+        if (y > 44) {
+            const plank = (x % 8 === 0) ? -14 : 0;
+            textures[1][idx] = packABGR(96 + noise * 0.5 + plank, 60 + plank * 0.5, 36);
+        } else {
+            const brickRow = Math.floor(y / 11);
+            const offsetX = (brickRow % 2) * 16;
+            const isMortar = (y % 11 === 0) || ((x + offsetX) % 32 === 0);
+            if (isMortar) {
+                textures[1][idx] = packABGR(42 + noise, 46 + noise, 58 + noise);
+            } else {
+                const bevel = (y % 11 === 1 || (x + offsetX) % 32 === 1) ? 14 : 0;
+                textures[1][idx] = packABGR(84 + noise + bevel, 92 + noise + bevel, 110 + noise + bevel);
+            }
+        }
+        const groove = Math.sin((x / TEX_SIZE) * Math.PI * 8) * 18;
+        textures[3][idx] = packABGR(185 + groove + noise * 0.4, 180 + groove + noise * 0.4, 172 + groove + noise * 0.4);
+    }
+}
+
+// ============================================================================
+// 3. 台球桌几何尺寸与台球物理状态
+// ============================================================================
+const TABLE = {
+    cx: 8.0,
+    cy: 7.5,
+    halfW: 1.45,
+    halfH: 0.78,
+    height: 0.36,
+    ballRadius: 0.052,
+    pocketRadius: 0.105
+};
+
+const POCKETS = [
+    { x: TABLE.cx - TABLE.halfW + 0.05, y: TABLE.cy - TABLE.halfH + 0.05 },
+    { x: TABLE.cx,                      y: TABLE.cy - TABLE.halfH + 0.03 },
+    { x: TABLE.cx + TABLE.halfW - 0.05, y: TABLE.cy - TABLE.halfH + 0.05 },
+    { x: TABLE.cx - TABLE.halfW + 0.05, y: TABLE.cy + TABLE.halfH - 0.05 },
+    { x: TABLE.cx,                      y: TABLE.cy + TABLE.halfH - 0.03 },
+    { x: TABLE.cx + TABLE.halfW - 0.05, y: TABLE.cy + TABLE.halfH - 0.05 }
+];
+
+let balls = [];
+let playerScore = 0;
+let aiScore = 0;
+let currentTurn = 'player';
+let aiThinkTimer = 0;
+let shotInProgress = false;
+let scoreBeforeShot = 0;
+let shooterOfCurrentShot = 'player';
+
+const player = {
+    x: 5.85,
+    y: 7.5,
+    dirX: 1,
+    dirY: 0,
+    planeX: 0,
+    planeY: 0.66,
+    pitch: -54,
+    walkPhase: 0,
+    moveIntensity: 0
+};
+
+const cueState = {
+    isCharging: false,
+    power: 0,
+    chargeDir: 1,
+    strokeOffset: 0,
+    strokeVel: 0,
+    legSpreadBounce: 0
+};
+
+function snapToCueBall() {
+    const cue = balls[0];
+    if (!cue || cue.pocketed) return;
+    let bestTarget = null;
+    let bestDist = Infinity;
+    for (const b of balls) {
+        if (b.id === 0 || b.pocketed) continue;
+        const d = Math.hypot(b.x - cue.x, b.y - cue.y);
+        if (d < bestDist) {
+            bestDist = d;
+            bestTarget = b;
+        }
+    }
+
+    let aimX = bestTarget ? (bestTarget.x - cue.x) : (TABLE.cx + 0.4 - cue.x);
+    let aimY = bestTarget ? (bestTarget.y - cue.y) : (TABLE.cy - cue.y);
+    const len = Math.hypot(aimX, aimY) || 1;
+    aimX /= len;
+    aimY /= len;
+
+    player.x = cue.x - aimX * 0.68;
+    player.y = cue.y - aimY * 0.68;
+    player.dirX = aimX;
+    player.dirY = aimY;
+    player.planeX = -aimY * 0.66;
+    player.planeY = aimX * 0.66;
+    player.pitch = -54;
+}
+
+function resetRack() {
+    balls = [];
+    balls.push({
+        id: 0,
+        x: TABLE.cx - 0.72,
+        y: TABLE.cy,
+        vx: 0,
+        vy: 0,
+        color: '#f8fafc',
+        stripe: false,
+        pocketed: false
+    });
+
+    const palette = [
+        { color: '#f97316', stripe: false },
+        { color: '#2563eb', stripe: false },
+        { color: '#111827', stripe: false },
+        { color: '#dc2626', stripe: false },
+        { color: '#eab308', stripe: false },
+        { color: '#16a34a', stripe: true  },
+        { color: '#7c3aed', stripe: true  },
+        { color: '#991b1b', stripe: true  },
+        { color: '#0284c7', stripe: true  }
+    ];
+
+    const startX = TABLE.cx + 0.42;
+    const startY = TABLE.cy;
+    const r = TABLE.ballRadius * 2.1;
+    let idx = 0;
+
+    for (let col = 0; col < 3; col++) {
+        for (let row = 0; row <= col; row++) {
+            const bx = startX + col * (r * 0.88);
+            const by = startY + (row - col * 0.5) * r;
+            const info = palette[idx % palette.length];
+            balls.push({
+                id: idx + 1,
+                x: bx,
+                y: by,
+                vx: 0,
+                vy: 0,
+                color: info.color,
+                stripe: info.stripe,
+                pocketed: false
+            });
+            idx++;
+        }
+    }
+
+    playerScore = 0;
+    aiScore = 0;
+    currentTurn = 'player';
+    shotInProgress = false;
+    snapToCueBall();
+    showToast('新球局摆好！玩家先手，按住左键或空格蓄力出杆！');
+}
+
+function toggleTopView() {
+    viewMode = (viewMode === '3d') ? 'top' : '3d';
+    showToast(viewMode === 'top' ? '已切换至【俯视全局台球桌视图】' : '已切换至【德军总部 3D 架杆视角】');
+}
+
+// ============================================================================
+// 4. 输入控制
+// ============================================================================
+const keys = {};
+let isRightDragging = false;
+
+window.addEventListener('keydown', e => {
+    keys[e.code] = true;
+    if (e.code === 'Space') {
+        e.preventDefault();
+        if (currentTurn === 'player') startCharging();
+    } else if (e.code === 'KeyR') {
+        resetRack();
+    } else if (e.code === 'KeyV') {
+        toggleTopView();
+    }
+});
+
+window.addEventListener('keyup', e => {
+    keys[e.code] = false;
+    if (e.code === 'Space' && currentTurn === 'player') releaseShot();
+});
+
+canvas.addEventListener('mousedown', e => {
+    initAudio();
+    if (currentTurn !== 'player') return;
+    if (e.button === 0) startCharging();
+    else if (e.button === 2) isRightDragging = true;
+});
+
+window.addEventListener('mouseup', e => {
+    if (e.button === 0 && cueState.isCharging) releaseShot();
+    else if (e.button === 2) isRightDragging = false;
+});
+
+window.addEventListener('mousemove', e => {
+    if (isRightDragging && currentTurn === 'player') {
+        rotateYaw(e.movementX * 0.0045);
+        player.pitch = Math.max(-95, Math.min(20, player.pitch - e.movementY * 0.5));
+    }
+});
+
+function rotateYaw(angle) {
+    const oldDirX = player.dirX;
+    player.dirX = player.dirX * Math.cos(angle) - player.dirY * Math.sin(angle);
+    player.dirY = oldDirX * Math.sin(angle) + player.dirY * Math.cos(angle);
+
+    const oldPlaneX = player.planeX;
+    player.planeX = player.planeX * Math.cos(angle) - player.planeY * Math.sin(angle);
+    player.planeY = oldPlaneX * Math.sin(angle) + player.planeY * Math.cos(angle);
+}
+
+function areBallsMoving() {
+    for (const b of balls) {
+        if (!b.pocketed && (Math.abs(b.vx) > 0.01 || Math.abs(b.vy) > 0.01)) return true;
+    }
+    return false;
+}
+
+function startCharging() {
+    if (areBallsMoving() || shotInProgress) {
+        showToast('请等台球完全停稳后再出杆！');
+        return;
+    }
+    cueState.isCharging = true;
+}
+
+function releaseShot() {
+    if (!cueState.isCharging) return;
+    cueState.isCharging = false;
+
+    const power = Math.max(0.16, cueState.power);
+    cueState.power = 0;
+    cueState.strokeVel = 24 + power * 30;
+    cueState.legSpreadBounce = 4.5 + power * 5;
+
+    const cue = balls[0];
+    if (!cue || cue.pocketed) return;
+
+    const speed = 1.9 + power * 5.8;
+    cue.vx = player.dirX * speed;
+    cue.vy = player.dirY * speed;
+    playBallHitSound(0.5 + power * 0.7);
+
+    scoreBeforeShot = playerScore + aiScore;
+    shooterOfCurrentShot = 'player';
+    shotInProgress = true;
+}
+
+// ============================================================================
+// 5. AI 机器人智能瞄准与击球 + 物理更新
+// ============================================================================
+function updateAI(dt) {
+    if (currentTurn !== 'ai' || shotInProgress || areBallsMoving()) return;
+
+    aiThinkTimer += dt;
+    if (aiThinkTimer < 1.25) return;
+    aiThinkTimer = 0;
+
+    const cue = balls[0];
+    const remaining = balls.filter(b => b.id !== 0 && !b.pocketed);
+    if (!cue || remaining.length === 0) return;
+
+    let bestDirX = 1, bestDirY = 0, bestScore = -Infinity;
+    for (const target of remaining) {
+        for (const pocket of POCKETS) {
+            const toPocketX = pocket.x - target.x;
+            const toPocketY = pocket.y - target.y;
+            const distPocket = Math.hypot(toPocketX, toPocketY) || 1;
+            const ghostX = target.x - (toPocketX / distPocket) * (TABLE.ballRadius * 1.95);
+            const ghostY = target.y - (toPocketY / distPocket) * (TABLE.ballRadius * 1.95);
+
+            const shotX = ghostX - cue.x;
+            const shotY = ghostY - cue.y;
+            const distShot = Math.hypot(shotX, shotY) || 1;
+            const align = (shotX / distShot) * (toPocketX / distPocket) + (shotY / distShot) * (toPocketY / distPocket);
+
+            const rating = align * 2.5 - distPocket - distShot * 0.6;
+            if (rating > bestScore) {
+                bestScore = rating;
+                bestDirX = shotX / distShot;
+                bestDirY = shotY / distShot;
+            }
+        }
+    }
+
+    const jitter = (Math.random() - 0.5) * 0.14;
+    const cosJ = Math.cos(jitter), sinJ = Math.sin(jitter);
+    const finalDirX = bestDirX * cosJ - bestDirY * sinJ;
+    const finalDirY = bestDirX * sinJ + bestDirY * cosJ;
+
+    player.x = cue.x - finalDirX * 0.68;
+    player.y = cue.y - finalDirY * 0.68;
+    player.dirX = finalDirX;
+    player.dirY = finalDirY;
+    player.planeX = -finalDirY * 0.66;
+    player.planeY = finalDirX * 0.66;
+
+    const power = 0.52 + Math.random() * 0.35;
+    cue.vx = finalDirX * (2.1 + power * 5.2);
+    cue.vy = finalDirY * (2.1 + power * 5.2);
+    cueState.strokeVel = 36;
+    cueState.legSpreadBounce = 7;
+    playBallHitSound(0.75);
+
+    scoreBeforeShot = playerScore + aiScore;
+    shooterOfCurrentShot = 'ai';
+    shotInProgress = true;
+    showToast('🤖 AI 机器人已摆好倒立架杆姿势并出杆！');
+}
+
+function canWalkTo(nx, ny) {
+    if (nx < 1.3 || nx > MAP_SIZE - 1.3 || ny < 1.3 || ny > MAP_SIZE - 1.3) return false;
+    const mx = Math.floor(nx), my = Math.floor(ny);
+    if (WORLD_MAP[my] && WORLD_MAP[my][mx] > 0) return false;
+    if (Math.abs(nx - TABLE.cx) < TABLE.halfW + 0.18 && Math.abs(ny - TABLE.cy) < TABLE.halfH + 0.18) return false;
+    return true;
+}
+
+function update(dt) {
+    if (currentTurn === 'player' && !shotInProgress) {
+        if (keys['ArrowLeft']) rotateYaw(-1.7 * dt);
+        if (keys['ArrowRight']) rotateYaw(1.7 * dt);
+        if (keys['ArrowUp']) player.pitch = Math.min(20, player.pitch + 85 * dt);
+        if (keys['ArrowDown']) player.pitch = Math.max(-95, player.pitch - 85 * dt);
+
+        const cue = balls[0];
+        if (cue && !cue.pocketed && (keys['KeyA'] || keys['KeyD'])) {
+            const orbitAngle = (keys['KeyD'] ? 1 : -1) * 1.45 * dt;
+            const relX = player.x - cue.x;
+            const relY = player.y - cue.y;
+            const nx = cue.x + relX * Math.cos(orbitAngle) - relY * Math.sin(orbitAngle);
+            const ny = cue.y + relX * Math.sin(orbitAngle) + relY * Math.cos(orbitAngle);
+            if (canWalkTo(nx, ny)) {
+                player.x = nx;
+                player.y = ny;
+                rotateYaw(orbitAngle);
+            }
+        }
+
+        let moveForward = 0;
+        if (keys['KeyW']) moveForward += 1;
+        if (keys['KeyS']) moveForward -= 1;
+        if (moveForward !== 0) {
+            const step = moveForward * 2.2 * dt;
+            if (canWalkTo(player.x + player.dirX * step, player.y)) player.x += player.dirX * step;
+            if (canWalkTo(player.x, player.y + player.dirY * step)) player.y += player.dirY * step;
+            player.moveIntensity += (1 - player.moveIntensity) * Math.min(1, dt * 10);
+            player.walkPhase += dt * 8.5;
+        } else {
+            player.moveIntensity += (0 - player.moveIntensity) * Math.min(1, dt * 8);
+        }
+
+        if (cueState.isCharging) {
+            cueState.power += cueState.chargeDir * dt * 1.15;
+            if (cueState.power >= 1) { cueState.power = 1; cueState.chargeDir = -1; }
+            else if (cueState.power <= 0.08) { cueState.power = 0.08; cueState.chargeDir = 1; }
+            cueState.strokeOffset += (-cueState.power * 34 - cueState.strokeOffset) * Math.min(1, dt * 18);
+        }
+    } else if (currentTurn === 'ai') {
+        updateAI(dt);
+    }
+
+    if (!cueState.isCharging) {
+        cueState.strokeVel += (-cueState.strokeOffset * 180 - cueState.strokeVel * 16) * dt;
+        cueState.strokeOffset += cueState.strokeVel * dt;
+    }
+    cueState.legSpreadBounce *= Math.exp(-dt * 10);
+
+    const subSteps = 4;
+    const subDt = dt / subSteps;
+    const minX = TABLE.cx - TABLE.halfW + 0.09 + TABLE.ballRadius;
+    const maxX = TABLE.cx + TABLE.halfW - 0.09 - TABLE.ballRadius;
+    const minY = TABLE.cy - TABLE.halfH + 0.09 + TABLE.ballRadius;
+    const maxY = TABLE.cy + TABLE.halfH - 0.09 - TABLE.ballRadius;
+
+    let cueScratchThisShot = false;
+
+    for (let step = 0; step < subSteps; step++) {
+        for (const b of balls) {
+            if (b.pocketed) continue;
+            b.x += b.vx * subDt;
+            b.y += b.vy * subDt;
+
+            const friction = Math.pow(0.28, subDt);
+            b.vx *= friction;
+            b.vy *= friction;
+            if (Math.hypot(b.vx, b.vy) < 0.015) { b.vx = 0; b.vy = 0; }
+
+            for (const p of POCKETS) {
+                if (Math.hypot(b.x - p.x, b.y - p.y) < TABLE.pocketRadius) {
+                    playPocketSound();
+                    if (b.id === 0) {
+                        b.x = TABLE.cx - 0.72;
+                        b.y = TABLE.cy;
+                        b.vx = 0;
+                        b.vy = 0;
+                        cueScratchThisShot = true;
+                        showToast('白球洗袋犯规！母球已放回开球区');
+                    } else {
+                        b.pocketed = true;
+                        b.vx = 0;
+                        b.vy = 0;
+                        if (shooterOfCurrentShot === 'player') playerScore++;
+                        else aiScore++;
+                    }
+                    break;
+                }
+            }
+
+            if (b.x < minX) { b.x = minX; b.vx = Math.abs(b.vx) * 0.85; playBallHitSound(Math.abs(b.vx) * 0.2); }
+            if (b.x > maxX) { b.x = maxX; b.vx = -Math.abs(b.vx) * 0.85; playBallHitSound(Math.abs(b.vx) * 0.2); }
+            if (b.y < minY) { b.y = minY; b.vy = Math.abs(b.vy) * 0.85; playBallHitSound(Math.abs(b.vy) * 0.2); }
+            if (b.y > maxY) { b.y = maxY; b.vy = -Math.abs(b.vy) * 0.85; playBallHitSound(Math.abs(b.vy) * 0.2); }
+        }
+
+        for (let i = 0; i < balls.length; i++) {
+            const b1 = balls[i];
+            if (b1.pocketed) continue;
+            for (let j = i + 1; j < balls.length; j++) {
+                const b2 = balls[j];
+                if (b2.pocketed) continue;
+                const dx = b2.x - b1.x;
+                const dy = b2.y - b1.y;
+                const dist = Math.hypot(dx, dy);
+                const minDist = TABLE.ballRadius * 2;
+                if (dist > 0 && dist < minDist) {
+                    const nx = dx / dist, ny = dy / dist;
+                    const overlap = (minDist - dist) * 0.5;
+                    b1.x -= nx * overlap; b1.y -= ny * overlap;
+                    b2.x += nx * overlap; b2.y += ny * overlap;
+
+                    const rvx = b2.vx - b1.vx, rvy = b2.vy - b1.vy;
+                    const velAlongNormal = rvx * nx + rvy * ny;
+                    if (velAlongNormal < 0) {
+                        const impulse = -(1 + 0.94) * velAlongNormal * 0.5;
+                        b1.vx -= impulse * nx; b1.vy -= impulse * ny;
+                        b2.vx += impulse * nx; b2.vy += impulse * ny;
+                        playBallHitSound(Math.min(1, Math.abs(velAlongNormal) * 0.3));
+                    }
+                }
+            }
+        }
+    }
+
+    if (shotInProgress && !areBallsMoving()) {
+        shotInProgress = false;
+        const remain = balls.filter(b => b.id !== 0 && !b.pocketed).length;
+
+        if (remain === 0) {
+            const winner = playerScore >= aiScore ? '🎉 恭喜玩家获胜！' : '🤖 AI 机器人获胜！';
+            showToast(`清台结束！${winner}（按 R 重新开局）`);
+            currentTurn = 'player';
+        } else {
+            const scored = (playerScore + aiScore) > scoreBeforeShot && !cueScratchThisShot;
+            if (scored) {
+                showToast(shooterOfCurrentShot === 'player' ? '🎱 漂亮进球！玩家继续连杆！' : '🤖 AI 进球有效！继续它的回合！');
+                currentTurn = shooterOfCurrentShot;
+                if (currentTurn === 'player') snapToCueBall();
+            } else {
+                if (shooterOfCurrentShot === 'player') {
+                    currentTurn = 'ai';
+                    aiThinkTimer = 0;
+                    showToast('没打进球！轮到 AI 机器人上台击球...');
+                } else {
+                    currentTurn = 'player';
+                    snapToCueBall();
+                    showToast('AI 没打进球！轮到玩家击球！');
+                }
+            }
+        }
+    }
+
+    const statusEl = document.getElementById('turn-status-text');
+    if (statusEl) {
+        const turnLabel = currentTurn === 'player'
+            ? '<b style="color:#38bdf8">玩家回合（按住左键/空格击球）</b>'
+            : '<b style="color:#f43f5e">🤖 AI 思考与出杆中...</b>';
+        statusEl.innerHTML = `当前: ${turnLabel} &nbsp;|&nbsp; 玩家进袋: <b style="color:#22c55e">${playerScore}</b> &nbsp; AI进袋: <b style="color:#f43f5e">${aiScore}</b>`;
+    }
+}
+
+// ============================================================================
+// 6. 德军总部 3D 风格光线投射背景渲染
+// ============================================================================
+function renderWolfensteinRoom() {
+    const horizonY = Math.floor(SCREEN_H / 2 + player.pitch);
+    const posZ = 0.5 * SCREEN_H;
+    const rayDirX0 = player.dirX - player.planeX;
+    const rayDirY0 = player.dirY - player.planeY;
+    const rayDirX1 = player.dirX + player.planeX;
+    const rayDirY1 = player.dirY + player.planeY;
+
+    for (let y = 0; y < SCREEN_H; y++) {
+        const isFloor = y >= horizonY;
+        const p = isFloor ? (y - horizonY + 1) : (horizonY - y);
+        const rowDistance = posZ / Math.max(0.5, p);
+        const floorStepX = rowDistance * (rayDirX1 - rayDirX0) / SCREEN_W;
+        const floorStepY = rowDistance * (rayDirY1 - rayDirY0) / SCREEN_W;
+        let floorX = player.x + rowDistance * rayDirX0;
+        let floorY = player.y + rowDistance * rayDirY0;
+        const fog = Math.max(0.28, Math.min(1.0, 1.0 - rowDistance / 16.0));
+
+        for (let x = 0; x < SCREEN_W; x++) {
+            const cellX = Math.floor(floorX), cellY = Math.floor(floorY);
+            const tx = Math.floor((floorX - cellX) * 32) & 31;
+            const ty = Math.floor((floorY - cellY) * 32) & 31;
+            floorX += floorStepX;
+            floorY += floorStepY;
+
+            let r, g, b;
+            if (isFloor) {
+                const checker = ((cellX + cellY) & 1) ? 16 : 0;
+                const seam = (tx === 0 || ty === 0) ? -16 : 0;
+                const base = 112 + checker + seam;
+                r = base * fog; g = (base + 4) * fog; b = (base + 12) * fog;
+            } else {
+                const beam = (tx < 3 || ty < 3) ? 44 : 62;
+                r = (beam + 12) * fog; g = beam * fog; b = (beam - 8) * fog;
+            }
+            frameBuf32[y * SCREEN_W + x] = packABGR(r, g, b);
+        }
+    }
+
+    for (let x = 0; x < SCREEN_W; x++) {
+        const cameraX = (2 * x) / SCREEN_W - 1;
+        const rayDirX = player.dirX + player.planeX * cameraX;
+        const rayDirY = player.dirY + player.planeY * cameraX;
+        let mapX = Math.floor(player.x), mapY = Math.floor(player.y);
+        const deltaDistX = Math.abs(rayDirX) < 1e-6 ? 1e30 : Math.abs(1 / rayDirX);
+        const deltaDistY = Math.abs(rayDirY) < 1e-6 ? 1e30 : Math.abs(1 / rayDirY);
+        let stepX, stepY, sideDistX, sideDistY;
+        if (rayDirX < 0) { stepX = -1; sideDistX = (player.x - mapX) * deltaDistX; }
+        else { stepX = 1; sideDistX = (mapX + 1.0 - player.x) * deltaDistX; }
+        if (rayDirY < 0) { stepY = -1; sideDistY = (player.y - mapY) * deltaDistY; }
+        else { stepY = 1; sideDistY = (mapY + 1.0 - player.y) * deltaDistY; }
+
+        let hit = 0, side = 0;
+        while (hit === 0) {
+            if (sideDistX < sideDistY) { sideDistX += deltaDistX; mapX += stepX; side = 0; }
+            else { sideDistY += deltaDistY; mapY += stepY; side = 1; }
+            if (mapX < 0 || mapX >= MAP_SIZE || mapY < 0 || mapY >= MAP_SIZE) hit = 1;
+            else if (WORLD_MAP[mapY][mapX] > 0) hit = WORLD_MAP[mapY][mapX];
+        }
+
+        const perpWallDist = side === 0 ? (sideDistX - deltaDistX) : (sideDistY - deltaDistY);
+        const lineHeight = Math.floor(SCREEN_H / Math.max(0.05, perpWallDist));
+        const drawStart = Math.max(0, Math.floor(-lineHeight / 2 + horizonY));
+        const drawEnd = Math.min(SCREEN_H - 1, Math.floor(lineHeight / 2 + horizonY));
+        let wallX = side === 0 ? (player.y + perpWallDist * rayDirY) : (player.x + perpWallDist * rayDirX);
+        wallX -= Math.floor(wallX);
+        let texX = Math.floor(wallX * TEX_SIZE);
+        if ((side === 0 && rayDirX > 0) || (side === 1 && rayDirY < 0)) texX = TEX_SIZE - texX - 1;
+        const tex = textures[hit] || textures[1];
+        const step = TEX_SIZE / lineHeight;
+        let texPos = (drawStart - horizonY + lineHeight / 2) * step;
+        const distFog = Math.max(0.28, Math.min(1.0, 1.0 - perpWallDist / 16.0)) * (side === 1 ? 0.78 : 1.0);
+
+        for (let y = drawStart; y <= drawEnd; y++) {
+            const texY = Math.floor(texPos) & (TEX_SIZE - 1);
+            texPos += step;
+            const col = tex[texY * TEX_SIZE + texX];
+            frameBuf32[y * SCREEN_W + x] = packABGR((col & 255) * distFog, ((col >> 8) & 255) * distFog, ((col >> 16) & 255) * distFog);
+        }
+    }
+    ctx.putImageData(frameImage, 0, 0);
+}
+
+// ============================================================================
+// 7. 3D 透视投影与台球桌渲染
+// ============================================================================
+function worldToCamera(wx, wy) {
+    const dx = wx - player.x;
+    const dy = wy - player.y;
+    const invDet = 1.0 / (player.planeX * player.dirY - player.dirX * player.planeY);
+    const camX = invDet * (player.dirY * dx - player.dirX * dy);
+    const camZ = invDet * (-player.planeY * dx + player.planeX * dy);
+    return { camX, camZ };
+}
+
+function cameraToScreen(camX, camZ, wz) {
+    const z = Math.max(0.08, camZ);
+    const horizonY = SCREEN_H / 2 + player.pitch;
+    const screenX = (SCREEN_W / 2) * (1 + camX / z);
+    const groundY = horizonY + (0.5 * SCREEN_H) / z;
+    const screenY = groundY - (wz * SCREEN_H) / z;
+    return { x: screenX, y: screenY, depth: z };
+}
+
+function clipPolygonNear(polyCam, nearZ = 0.12) {
+    const out = [];
+    for (let i = 0; i < polyCam.length; i++) {
+        const cur = polyCam[i];
+        const prev = polyCam[(i + polyCam.length - 1) % polyCam.length];
+        const curIn = cur.camZ >= nearZ;
+        const prevIn = prev.camZ >= nearZ;
+        if (curIn !== prevIn) {
+            const t = (nearZ - prev.camZ) / (cur.camZ - prev.camZ);
+            out.push({
+                camX: prev.camX + (cur.camX - prev.camX) * t,
+                camZ: nearZ
+            });
+        }
+        if (curIn) out.push(cur);
+    }
+    return out;
+}
+
+function drawProjectedQuad(worldPts, wz, fillStyle, strokeStyle = null, lineWidth = 1.5) {
+    const camPts = worldPts.map(p => worldToCamera(p.x, p.y));
+    const clipped = clipPolygonNear(camPts, 0.12);
+    if (clipped.length < 3) return;
+    const scrPts = clipped.map(p => cameraToScreen(p.camX, p.camZ, wz));
+
+    ctx.beginPath();
+    ctx.moveTo(scrPts[0].x, scrPts[0].y);
+    for (let i = 1; i < scrPts.length; i++) ctx.lineTo(scrPts[i].x, scrPts[i].y);
+    ctx.closePath();
+    ctx.fillStyle = fillStyle;
+    ctx.fill();
+    if (strokeStyle) {
+        ctx.strokeStyle = strokeStyle;
+        ctx.lineWidth = lineWidth;
+        ctx.stroke();
+    }
+}
+
+function renderPoolTableAndBalls3D() {
+    const x0 = TABLE.cx - TABLE.halfW;
+    const x1 = TABLE.cx + TABLE.halfW;
+    const y0 = TABLE.cy - TABLE.halfH;
+    const y1 = TABLE.cy + TABLE.halfH;
+    const h = TABLE.height;
+
+    const topWorld = [
+        { x: x0, y: y0 },
+        { x: x1, y: y0 },
+        { x: x1, y: y1 },
+        { x: x0, y: y1 }
+    ];
+
+    for (let i = 0; i < 4; i++) {
+        const pA = topWorld[i];
+        const pB = topWorld[(i + 1) % 4];
+        const cA = worldToCamera(pA.x, pA.y);
+        const cB = worldToCamera(pB.x, pB.y);
+        if (cA.camZ <= 0.12 && cB.camZ <= 0.12) continue;
+
+        const clippedEdge = clipPolygonNear([cA, cB], 0.12);
+        if (clippedEdge.length < 2) continue;
+        const sTopA = cameraToScreen(clippedEdge[0].camX, clippedEdge[0].camZ, h);
+        const sTopB = cameraToScreen(clippedEdge[1].camX, clippedEdge[1].camZ, h);
+        const sBotA = cameraToScreen(clippedEdge[0].camX, clippedEdge[0].camZ, 0);
+        const sBotB = cameraToScreen(clippedEdge[1].camX, clippedEdge[1].camZ, 0);
+
+        ctx.fillStyle = '#3e2212';
+        ctx.beginPath();
+        ctx.moveTo(sTopA.x, sTopA.y);
+        ctx.lineTo(sTopB.x, sTopB.y);
+        ctx.lineTo(sBotB.x, sBotB.y);
+        ctx.lineTo(sBotA.x, sBotA.y);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#1b0e07';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+    }
+
+    drawProjectedQuad(topWorld, h, '#8c5832', '#1f1209', 2);
+
+    const pad = 0.095;
+    const feltWorld = [
+        { x: x0 + pad, y: y0 + pad },
+        { x: x1 - pad, y: y0 + pad },
+        { x: x1 - pad, y: y1 - pad },
+        { x: x0 + pad, y: y1 - pad }
+    ];
+    drawProjectedQuad(feltWorld, h + 0.004, '#166d3f', '#0d4728', 2);
+
+    for (const p of POCKETS) {
+        const cam = worldToCamera(p.x, p.y);
+        if (cam.camZ <= 0.12) continue;
+        const scr = cameraToScreen(cam.camX, cam.camZ, h + 0.007);
+        const rx = Math.max(4, (TABLE.pocketRadius * SCREEN_H) / scr.depth);
+        ctx.fillStyle = '#090d16';
+        ctx.beginPath();
+        ctx.ellipse(scr.x, scr.y, rx, rx * 0.56, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#334155';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+    }
+
+    const cue = balls[0];
+    if (cue && !cue.pocketed && !areBallsMoving() && currentTurn === 'player') {
+        const cStart = worldToCamera(cue.x, cue.y);
+        const cEnd = worldToCamera(cue.x + player.dirX * 1.45, cue.y + player.dirY * 1.45);
+        const seg = clipPolygonNear([cStart, cEnd], 0.12);
+        if (seg.length >= 2) {
+            const s1 = cameraToScreen(seg[0].camX, seg[0].camZ, h + TABLE.ballRadius * 0.6);
+            const s2 = cameraToScreen(seg[1].camX, seg[1].camZ, h + TABLE.ballRadius * 0.6);
+            ctx.save();
+            ctx.strokeStyle = cueState.isCharging ? '#facc15' : 'rgba(255,255,255,0.75)';
+            ctx.setLineDash([4, 4]);
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(s1.x, s1.y);
+            ctx.lineTo(s2.x, s2.y);
+            ctx.stroke();
+            ctx.restore();
+        }
+    }
+
+    const projectedBalls = [];
+    for (const b of balls) {
+        if (b.pocketed) continue;
+        const cam = worldToCamera(b.x, b.y);
+        if (cam.camZ <= 0.12) continue;
+        const scr = cameraToScreen(cam.camX, cam.camZ, h + TABLE.ballRadius);
+        projectedBalls.push({ ball: b, scr });
+    }
+    projectedBalls.sort((a, b) => b.scr.depth - a.scr.depth);
+
+    for (const item of projectedBalls) {
+        const { ball, scr } = item;
+        const radius = Math.max(3.5, (TABLE.ballRadius * SCREEN_H) / scr.depth);
+        const bx = Math.round(scr.x);
+        const by = Math.round(scr.y);
+
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+        ctx.beginPath();
+        ctx.ellipse(bx + 1, by + radius * 0.72, radius * 1.05, radius * 0.42, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = ball.color;
+        ctx.beginPath();
+        ctx.arc(bx, by, radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        if (ball.stripe) {
+            ctx.fillStyle = '#f8fafc';
+            ctx.fillRect(bx - radius * 0.85, by - radius * 0.34, radius * 1.7, radius * 0.68);
+        }
+
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
+        ctx.beginPath();
+        ctx.arc(bx - radius * 0.32, by - radius * 0.32, Math.max(1.2, radius * 0.28), 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = '#090d16';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(bx, by, radius, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+}
+
+function renderTopDownTableView() {
+    ctx.fillStyle = '#111827';
+    ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
+
+    const scale = 128;
+    const ox = SCREEN_W * 0.5;
+    const oy = SCREEN_H * 0.52;
+    const tw = TABLE.halfW * 2 * scale;
+    const th = TABLE.halfH * 2 * scale;
+
+    ctx.fillStyle = '#78482a';
+    ctx.fillRect(ox - tw / 2, oy - th / 2, tw, th);
+    ctx.strokeStyle = '#1c1008';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(ox - tw / 2, oy - th / 2, tw, th);
+
+    const pad = 0.095 * scale;
+    ctx.fillStyle = '#15653a';
+    ctx.fillRect(ox - tw / 2 + pad, oy - th / 2 + pad, tw - pad * 2, th - pad * 2);
+
+    for (const p of POCKETS) {
+        const px = ox + (p.x - TABLE.cx) * scale;
+        const py = oy + (p.y - TABLE.cy) * scale;
+        ctx.fillStyle = '#090d16';
+        ctx.beginPath();
+        ctx.arc(px, py, TABLE.pocketRadius * scale, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    const cue = balls[0];
+    if (cue && !cue.pocketed && !areBallsMoving() && currentTurn === 'player') {
+        const cx = ox + (cue.x - TABLE.cx) * scale;
+        const cy = oy + (cue.y - TABLE.cy) * scale;
+        ctx.save();
+        ctx.strokeStyle = cueState.isCharging ? '#facc15' : 'rgba(255,255,255,0.7)';
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + player.dirX * 140, cy + player.dirY * 140);
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    for (const b of balls) {
+        if (b.pocketed) continue;
+        const bx = ox + (b.x - TABLE.cx) * scale;
+        const by = oy + (b.y - TABLE.cy) * scale;
+        const r = TABLE.ballRadius * scale;
+        ctx.fillStyle = b.color;
+        ctx.beginPath();
+        ctx.arc(bx, by, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#090d16';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+    }
+}
+
+// ============================================================================
+// 8. 倒立美少女角色 + 顶层木质台球杆（球杆位于女孩上方）
+// ============================================================================
+function renderHandstandGirlAndCue() {
+    const cx = SCREEN_W * 0.5;
+    const walkBobX = Math.cos(player.walkPhase) * 2.2 * player.moveIntensity;
+    const walkBobY = Math.abs(Math.sin(player.walkPhase)) * 2.0 * player.moveIntensity;
+    const bounce = cueState.legSpreadBounce;
+
+    const anchorX = Math.round(cx + walkBobX);
+    const groundY = Math.round(SCREEN_H - 6 + walkBobY);
+    const crotchY = Math.round(groundY - 122);
+    const stroke = cueState.strokeOffset;
+
+    ctx.save();
+
+    // ------------------------------------------------------------------------
+    // 1. 先完整绘制倒立美少女（作为背景前景人物，位于球杆下方）
+    // ------------------------------------------------------------------------
+    const headCenterY = groundY - 38;
+    const hairTopY = groundY - 26;
+    const hairTipY = groundY - 2;
+
+    // 1A. 下垂深棕色卷曲马尾辫
+    ctx.fillStyle = '#2b1810';
+    ctx.beginPath();
+    ctx.moveTo(anchorX - 5, hairTopY);
+    ctx.quadraticCurveTo(anchorX - 15, hairTopY + 12, anchorX - 9, hairTipY - 2);
+    ctx.quadraticCurveTo(anchorX - 3, hairTipY + 2, anchorX, hairTipY - 3);
+    ctx.quadraticCurveTo(anchorX + 4, hairTipY + 2, anchorX + 10, hairTipY - 2);
+    ctx.quadraticCurveTo(anchorX + 14, hairTopY + 11, anchorX + 5, hairTopY);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#140b07';
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+
+    ctx.strokeStyle = '#4a2c1d';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(anchorX - 3, hairTopY + 3);
+    ctx.quadraticCurveTo(anchorX - 7, hairTopY + 13, anchorX - 4, hairTipY - 3);
+    ctx.moveTo(anchorX + 3, hairTopY + 3);
+    ctx.quadraticCurveTo(anchorX + 6, hairTopY + 13, anchorX + 3, hairTipY - 3);
+    ctx.stroke();
+
+    // 1B. 左右撑地手臂
+    drawSupportArm(anchorX, groundY, -1);
+    drawSupportArm(anchorX, groundY, 1);
+
+    // 1C. 倒立上半身（脖子/锁骨 + 运动背心 + 马甲线腰腹）
+    const shoulderY = groundY - 62;
+    const chestBottomY = groundY - 82;
+    const waistBottomY = groundY - 103;
+
+    ctx.fillStyle = '#e59a54';
+    ctx.beginPath();
+    ctx.moveTo(anchorX - 7, headCenterY - 9);
+    ctx.lineTo(anchorX - 20, shoulderY);
+    ctx.lineTo(anchorX + 20, shoulderY);
+    ctx.lineTo(anchorX + 7, headCenterY - 9);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#18181b';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.strokeStyle = '#be7232';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(anchorX - 11, shoulderY + 4);
+    ctx.quadraticCurveTo(anchorX - 4, shoulderY + 7, anchorX - 1, shoulderY + 3);
+    ctx.moveTo(anchorX + 11, shoulderY + 4);
+    ctx.quadraticCurveTo(anchorX + 4, shoulderY + 7, anchorX + 1, shoulderY + 3);
+    ctx.moveTo(anchorX, shoulderY + 7);
+    ctx.lineTo(anchorX, shoulderY + 14);
+    ctx.stroke();
+
+    // 运动背心
+    ctx.fillStyle = '#4b4e57';
+    ctx.beginPath();
+    ctx.moveTo(anchorX - 21, shoulderY);
+    ctx.lineTo(anchorX - 15, shoulderY);
+    ctx.quadraticCurveTo(anchorX - 13, shoulderY + 13, anchorX, shoulderY + 13);
+    ctx.quadraticCurveTo(anchorX + 13, shoulderY + 13, anchorX + 15, shoulderY);
+    ctx.lineTo(anchorX + 21, shoulderY);
+    ctx.lineTo(anchorX + 24, chestBottomY);
+    ctx.quadraticCurveTo(anchorX, chestBottomY - 3, anchorX - 24, chestBottomY);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#18181b';
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+
+    ctx.strokeStyle = '#2e3038';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(anchorX - 23, chestBottomY + 3);
+    ctx.quadraticCurveTo(anchorX, chestBottomY + 1, anchorX + 23, chestBottomY + 3);
+    ctx.stroke();
+
+    // 马甲线腰腹
+    ctx.fillStyle = '#e59a54';
+    ctx.beginPath();
+    ctx.moveTo(anchorX - 23, chestBottomY);
+    ctx.quadraticCurveTo(anchorX, chestBottomY - 3, anchorX + 23, chestBottomY);
+    ctx.lineTo(anchorX + 25, waistBottomY);
+    ctx.quadraticCurveTo(anchorX, waistBottomY - 4, anchorX - 25, waistBottomY);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#18181b';
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+
+    ctx.strokeStyle = '#c47837';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(anchorX, chestBottomY - 3);
+    ctx.lineTo(anchorX, waistBottomY + 2);
+    ctx.moveTo(anchorX - 9, chestBottomY - 4);
+    ctx.quadraticCurveTo(anchorX - 10, (chestBottomY + waistBottomY) * 0.5, anchorX - 8, waistBottomY + 3);
+    ctx.moveTo(anchorX + 9, chestBottomY - 4);
+    ctx.quadraticCurveTo(anchorX + 10, (chestBottomY + waistBottomY) * 0.5, anchorX + 8, waistBottomY + 3);
+    ctx.stroke();
+
+    // 1D. 倒置甜美头部
+    drawInvertedGirlHead(anchorX, headCenterY);
+
+    // 1E. 填实高腰瑜伽裤裆部三角区（消除双腿之间露背景绿色的缝隙）
+    ctx.fillStyle = '#4b4e57';
+    ctx.beginPath();
+    ctx.moveTo(anchorX - 30, waistBottomY - 10);
+    ctx.lineTo(anchorX - 9, crotchY + 1);
+    ctx.lineTo(anchorX + 9, crotchY + 1);
+    ctx.lineTo(anchorX + 30, waistBottomY - 10);
+    ctx.closePath();
+    ctx.fill();
+
+    // 1F. V字高抬修长双腿
+    drawIllustrationLeg(anchorX, crotchY, waistBottomY, -1, bounce);
+    drawIllustrationLeg(anchorX, crotchY, waistBottomY, 1, bounce);
+
+    // 1G. 高腰瑜伽裤腰头束腰带与裆部中线缝线
+    ctx.fillStyle = '#4b4e57';
+    ctx.beginPath();
+    ctx.moveTo(anchorX - 25, waistBottomY);
+    ctx.quadraticCurveTo(anchorX, waistBottomY - 4, anchorX + 25, waistBottomY);
+    ctx.lineTo(anchorX + 30, waistBottomY - 11);
+    ctx.quadraticCurveTo(anchorX, waistBottomY - 15, anchorX - 30, waistBottomY - 11);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#18181b';
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+
+    ctx.strokeStyle = '#2e3038';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(anchorX - 27, waistBottomY - 5);
+    ctx.quadraticCurveTo(anchorX, waistBottomY - 9, anchorX + 27, waistBottomY - 5);
+    ctx.moveTo(anchorX, waistBottomY - 12);
+    ctx.lineTo(anchorX, crotchY);
+    ctx.stroke();
+
+    // ------------------------------------------------------------------------
+    // 2. 最后在女孩【最上方】绘制整根完整的木质台球杆（盖在女孩身体与裤裆正上方！）
+    // ------------------------------------------------------------------------
+    const buttY = Math.round(SCREEN_H + 14 - stroke * 1.15);
+    const tipY = Math.round(crotchY - 62 - stroke * 1.15);
+    drawWoodCue(anchorX, buttY, anchorX, tipY, 5.2, 2.0, true);
+
+    ctx.restore();
+}
+
+function drawSupportArm(anchorX, groundY, side) {
+    const shoulderX = anchorX + side * 21;
+    const shoulderY = groundY - 62;
+    const elbowX = anchorX + side * 25;
+    const elbowY = groundY - 32;
+    const wristX = anchorX + side * 22;
+    const wristY = groundY - 4;
+
+    ctx.fillStyle = '#e59a54';
+    ctx.beginPath();
+    ctx.moveTo(shoulderX - side * 4, shoulderY + 2);
+    ctx.quadraticCurveTo(elbowX - side * 4, elbowY, wristX - side * 3, wristY);
+    ctx.lineTo(wristX + side * 3, wristY);
+    ctx.quadraticCurveTo(elbowX + side * 5, elbowY, shoulderX + side * 4, shoulderY - 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#18181b';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.fillStyle = '#e59a54';
+    ctx.beginPath();
+    ctx.ellipse(wristX + side * 3, groundY - 2, 8, 2.8, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#18181b';
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+}
+
+function drawInvertedGirlHead(cx, cy) {
+    ctx.fillStyle = '#24140e';
+    ctx.beginPath();
+    ctx.arc(cx, cy + 2, 13.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#eab075';
+    ctx.beginPath();
+    ctx.moveTo(cx - 10, cy + 2);
+    ctx.quadraticCurveTo(cx - 9, cy - 11, cx, cy - 12);
+    ctx.quadraticCurveTo(cx + 9, cy - 11, cx + 10, cy + 2);
+    ctx.quadraticCurveTo(cx + 9, cy + 12, cx, cy + 12);
+    ctx.quadraticCurveTo(cx - 9, cy + 12, cx - 10, cy + 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#18181b';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.fillStyle = '#2b1810';
+    ctx.beginPath();
+    ctx.arc(cx, cy + 3, 11.2, 0.12 * Math.PI, 0.88 * Math.PI);
+    ctx.fill();
+
+    ctx.fillStyle = '#e11d48';
+    ctx.beginPath();
+    ctx.arc(cx, cy - 5.5, 3.2, Math.PI, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(cx - 2.2, cy - 6.8, 4.4, 1.3);
+
+    ctx.strokeStyle = '#b4692e';
+    ctx.lineWidth = 1.1;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - 2);
+    ctx.lineTo(cx - 1, cy + 0.5);
+    ctx.stroke();
+
+    for (const side of [-1, 1]) {
+        const ex = cx + side * 4.5;
+        const ey = cy + 2.5;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.ellipse(ex, ey, 2.3, 1.6, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#18181b';
+        ctx.beginPath();
+        ctx.arc(ex, ey, 1.3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#24140e';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(ex - 2.2, ey + 2.8);
+        ctx.quadraticCurveTo(ex, ey + 3.6, ex + 2.2, ey + 2.8);
+        ctx.stroke();
+    }
+}
+
+function drawIllustrationLeg(anchorX, crotchY, waistBottomY, side, bounce) {
+    const ankleX = anchorX + side * (148 + bounce * 0.8);
+    const ankleY = 34 - bounce * 0.5;
+
+    const hipOuterX = anchorX + side * 30;
+    const hipOuterY = waistBottomY - 11;
+    const hipInnerX = anchorX + side * 8;
+    const hipInnerY = crotchY;
+
+    const kneeOuterX = anchorX + side * 88;
+    const kneeOuterY = 98;
+    const calfOuterX = anchorX + side * 120;
+    const calfOuterY = 64;
+
+    const kneeInnerX = anchorX + side * 72;
+    const kneeInnerY = 88;
+
+    ctx.fillStyle = '#4b4e57';
+    ctx.beginPath();
+    ctx.moveTo(hipInnerX, hipInnerY);
+    ctx.quadraticCurveTo(kneeInnerX, kneeInnerY, ankleX - side * 3.5, ankleY - 4);
+    ctx.lineTo(ankleX + side * 4.5, ankleY + 4);
+    ctx.quadraticCurveTo(calfOuterX, calfOuterY, kneeOuterX, kneeOuterY);
+    ctx.quadraticCurveTo(anchorX + side * 56, 134, hipOuterX, hipOuterY);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = '#636773';
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.moveTo(hipOuterX - side * 4, hipOuterY - 3);
+    ctx.quadraticCurveTo(kneeOuterX - side * 3, kneeOuterY, ankleX + side * 1.5, ankleY + 1.5);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#18181b';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(hipInnerX, hipInnerY);
+    ctx.quadraticCurveTo(kneeInnerX, kneeInnerY, ankleX - side * 3.5, ankleY - 4);
+    ctx.lineTo(ankleX + side * 4.5, ankleY + 4);
+    ctx.quadraticCurveTo(calfOuterX, calfOuterY, kneeOuterX, kneeOuterY);
+    ctx.quadraticCurveTo(anchorX + side * 56, 134, hipOuterX, hipOuterY);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#272930';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(ankleX - side * 3.5, ankleY - 4);
+    ctx.lineTo(ankleX + side * 4.5, ankleY + 4);
+    ctx.stroke();
+
+    const heelX = ankleX + side * 11;
+    const heelY = ankleY + 3;
+    const toeX = ankleX + side * 24;
+    const toeY = ankleY - 12;
+    const archX = ankleX + side * 10;
+    const archY = ankleY - 10;
+
+    ctx.fillStyle = '#e59a54';
+    ctx.beginPath();
+    ctx.moveTo(ankleX - side * 3.5, ankleY - 4);
+    ctx.quadraticCurveTo(archX, archY, toeX - side * 3, toeY - 2);
+    ctx.quadraticCurveTo(toeX + side * 3, toeY, toeX, toeY + 5);
+    ctx.quadraticCurveTo(heelX + side * 3, heelY + 2, heelX, heelY);
+    ctx.lineTo(ankleX + side * 4.5, ankleY + 4);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = '#18181b';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+}
+
+function drawWoodCue(x0, y0, x1, y1, w0, w1, hasTip) {
+    // 黑色外描边
+    ctx.fillStyle = '#090d16';
+    ctx.beginPath();
+    ctx.moveTo(x0 - w0 - 1.3, y0);
+    ctx.lineTo(x1 - w1 - 1.3, y1);
+    ctx.lineTo(x1 + w1 + 1.3, y1);
+    ctx.lineTo(x0 + w0 + 1.3, y0);
+    ctx.closePath();
+    ctx.fill();
+
+    // 枫木球杆主体
+    ctx.fillStyle = '#d9a066';
+    ctx.beginPath();
+    ctx.moveTo(x0 - w0, y0);
+    ctx.lineTo(x1 - w1, y1);
+    ctx.lineTo(x1 + w1, y1);
+    ctx.lineTo(x0 + w0, y0);
+    ctx.closePath();
+    ctx.fill();
+
+    // 高光木纹
+    ctx.fillStyle = '#f3c68f';
+    ctx.beginPath();
+    ctx.moveTo(x0 - w0 * 0.4, y0);
+    ctx.lineTo(x1 - w1 * 0.4, y1);
+    ctx.lineTo(x1 + w1 * 0.2, y1);
+    ctx.lineTo(x0 + w0 * 0.2, y0);
+    ctx.closePath();
+    ctx.fill();
+
+    // 球杆后握把黑漆装饰环
+    const gripTopY = y0 - 46;
+    const gripWTop = w0 + (w1 - w0) * (46 / Math.max(1, y0 - y1));
+    ctx.fillStyle = '#1e293b';
+    ctx.beginPath();
+    ctx.moveTo(x0 - w0, y0);
+    ctx.lineTo(x0 - gripWTop, gripTopY);
+    ctx.lineTo(x0 + gripWTop, gripTopY);
+    ctx.lineTo(x0 + w0, y0);
+    ctx.closePath();
+    ctx.fill();
+
+    if (hasTip) {
+        ctx.fillStyle = '#f8fafc';
+        ctx.fillRect(Math.round(x1 - w1), Math.round(y1), Math.round(w1 * 2), 4);
+        ctx.fillStyle = '#0284c7';
+        ctx.fillRect(Math.round(x1 - w1), Math.round(y1 - 3), Math.round(w1 * 2), 3);
+    }
+}
+
+// ============================================================================
+// 9. HUD 与迷你雷达渲染
+// ============================================================================
+function renderHUD() {
+    const barX = 14, barY = SCREEN_H - 86, barW = 14, barH = 72;
+    ctx.fillStyle = 'rgba(9, 13, 22, 0.85)';
+    ctx.fillRect(barX - 3, barY - 14, barW + 6, barH + 18);
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(barX - 3, barY - 14, barW + 6, barH + 18);
+
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = 'bold 9px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('力度', barX + barW / 2, barY - 4);
+
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(barX, barY, barW, barH);
+    if (cueState.power > 0) {
+        const fillH = Math.round(barH * cueState.power);
+        ctx.fillStyle = cueState.power > 0.75 ? '#ef4444' : (cueState.power > 0.4 ? '#facc15' : '#22c55e');
+        ctx.fillRect(barX, barY + barH - fillH, barW, fillH);
+    }
+
+    const radarScale = 24;
+    const rx = SCREEN_W - 86;
+    const ry = SCREEN_H - 44;
+    const rw = TABLE.halfW * 2 * radarScale;
+    const rh = TABLE.halfH * 2 * radarScale;
+
+    ctx.fillStyle = 'rgba(9, 13, 22, 0.88)';
+    ctx.fillRect(rx - 4, ry - 4, rw + 8, rh + 8);
+    ctx.fillStyle = '#15653a';
+    ctx.fillRect(rx, ry, rw, rh);
+    ctx.strokeStyle = '#78482a';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(rx, ry, rw, rh);
+
+    for (const b of balls) {
+        if (b.pocketed) continue;
+        const bx = rx + (b.x - (TABLE.cx - TABLE.halfW)) * radarScale;
+        const by = ry + (b.y - (TABLE.cy - TABLE.halfH)) * radarScale;
+        ctx.fillStyle = b.color;
+        ctx.beginPath();
+        ctx.arc(bx, by, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    const cue = balls[0];
+    if (cue && !cue.pocketed) {
+        const cx = rx + (cue.x - (TABLE.cx - TABLE.halfW)) * radarScale;
+        const cy = ry + (cue.y - (TABLE.cy - TABLE.halfH)) * radarScale;
+        ctx.strokeStyle = '#facc15';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + player.dirX * 14, cy + player.dirY * 14);
+        ctx.stroke();
+    }
+}
+
+// ============================================================================
+// 10. 立即初始化并启动主循环
+// ============================================================================
+resetRack();
+
+let lastTime = performance.now();
+function gameLoop(now) {
+    const dt = Math.min(0.05, Math.max(0.001, (now - lastTime) / 1000));
+    lastTime = now;
+
+    update(dt);
+
+    if (viewMode === '3d') {
+        renderWolfensteinRoom();
+        renderPoolTableAndBalls3D();
+    } else {
+        renderTopDownTableView();
+    }
+
+    renderHandstandGirlAndCue();
+    renderHUD();
+
+    requestAnimationFrame(gameLoop);
+}
+
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
